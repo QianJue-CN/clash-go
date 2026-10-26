@@ -1,0 +1,14 @@
+# 仅用于验证启动和代理链路，不包含远程节点，不提供翻墙能力。
+# 正式使用时请导入可信服务商的完整 mihomo YAML 配置。
+mode: rule
+log-level: info
+ipv6: false
+proxies: []
+proxy-groups:
+  - name: PROXY
+    type: select
+    proxies:
+      - DIRECT
+      - REJECT
+rules:
+  - MATCH,PROXY
