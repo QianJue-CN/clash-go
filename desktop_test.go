@@ -29,7 +29,7 @@ func TestNativeNavigation(t *testing.T) {
 	if err := tt.Click("前往导入配置"); err != nil {
 		t.Fatal(err)
 	}
-	if s.page != "profiles" || !tt.HasText("HTTPS 订阅") {
+	if s.page != "profiles" || !tt.HasText("添加订阅…") {
 		t.Fatal(tt.Texts())
 	}
 	for _, page := range []struct{ label, id, text string }{
@@ -96,6 +96,73 @@ func TestManagedKernelSettings(t *testing.T) {
 	}
 	if !s.busy {
 		t.Fatal("busy update control was enabled")
+	}
+}
+
+func TestSubscriptionDialog(t *testing.T) {
+	s := &desktop{page: "profiles", state: core.Snapshot{KernelReady: true, Port: 17890,
+		ActiveProfile: "one", Running: true, Profiles: []core.Profile{{ID: "one", Name: "服务商 A"}, {ID: "two", Name: "订阅 1"}}}}
+	tt := ui.NewTester(s.view, 1080, 760)
+	if !tt.HasText("服务商 A") || !tt.HasText("订阅 1") || tt.HasText("HTTPS 订阅地址") {
+		t.Fatal(tt.Texts())
+	}
+	if err := tt.Click("启用订阅 服务商 A"); err != nil {
+		t.Fatal(err)
+	}
+	if s.busy {
+		t.Fatal("active profile restarted")
+	}
+	if err := tt.Click("添加订阅…"); err != nil {
+		t.Fatal(err)
+	}
+	if !s.showAddSubscription || !tt.Focused("HTTPS 订阅地址") {
+		t.Fatal("dialog did not take input focus")
+	}
+	if err := tt.Click("确认添加"); err != nil {
+		t.Fatal(err)
+	}
+	if s.busy {
+		t.Fatal("empty subscription submitted")
+	}
+	tt.Type("https://example.com/config?token=private")
+	if err := tt.Click("取消"); err != nil {
+		t.Fatal(err)
+	}
+	if s.showAddSubscription || s.subscription != "" {
+		t.Fatal("cancel did not clear subscription token")
+	}
+	if err := tt.Click("添加订阅…"); err != nil {
+		t.Fatal(err)
+	}
+	s.addFailure = "订阅服务器返回 HTTP 403"
+	tt.Frame()
+	if !tt.HasText(s.addFailure) {
+		t.Fatal("failure not shown in dialog")
+	}
+	tt.Key(0, ui.KeyEscape)
+	if s.showAddSubscription || s.addFailure != "" {
+		t.Fatal("Escape did not dismiss")
+	}
+	if err := tt.Click("添加订阅…"); err != nil {
+		t.Fatal(err)
+	}
+	s.addingSubscription, s.busy = true, true
+	tt.Frame()
+	tt.Key(0, ui.KeyEscape)
+	if !s.showAddSubscription {
+		t.Fatal("dismissed in-flight add")
+	}
+	if err := tt.Click("取消"); err != nil {
+		t.Fatal(err)
+	}
+	if !s.showAddSubscription {
+		t.Fatal("canceled in-flight add")
+	}
+	s.addingSubscription, s.busy = false, false
+	tt.Frame()
+	tt.Key(0, ui.KeyEscape)
+	if s.showAddSubscription {
+		t.Fatal("dialog remained locked after completion")
 	}
 }
 

@@ -62,7 +62,7 @@ func fakeCore() int {
 	if *check {
 		return 0
 	}
-	if os.Getenv("CLASHGO_TEST_EXIT") == "1" || behavior == "crash" {
+	if os.Getenv("CLASHGO_TEST_EXIT") == "1" || behavior == "crash" || bytes.Contains(data, []byte("crash.test")) {
 		return 4
 	}
 	secret, _ := config["secret"].(string)
@@ -342,6 +342,71 @@ func TestRealMihomo(t *testing.T) {
 	body, err := io.ReadAll(resp.Body)
 	if err != nil || string(body) != "proxied successfully" {
 		t.Fatalf("proxy response %q: %v", body, err)
+	}
+	first := m.Snapshot().ActiveProfile
+	second, err := m.AddProfile(ctx, "真实内核切换测试", []byte(directConfig+"mode: direct\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := m.SwitchProfile(ctx, second); err != nil {
+		t.Fatal(err)
+	}
+	if m.Snapshot().ActiveProfile != second || m.Snapshot().Mode != "direct" {
+		t.Fatal("real profile switch failed")
+	}
+	transport.CloseIdleConnections()
+	secondResponse, err := client.Get(target.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondBody, readErr := io.ReadAll(secondResponse.Body)
+	secondResponse.Body.Close()
+	if readErr != nil || string(secondBody) != "proxied successfully" {
+		t.Fatal("proxy failed after profile switch", readErr)
+	}
+	if err := m.SwitchProfile(ctx, first); err != nil {
+		t.Fatal(err)
+	}
+	if m.Snapshot().Mode != "rule" {
+		t.Fatal("old profile could not be restored")
+	}
+	for _, page := range []string{"rules", "providers"} {
+		if err := m.RefreshPage(ctx, page); err != nil {
+			t.Fatalf("real %s API: %v", page, err)
+		}
+	}
+	if len(m.Snapshot().Rules) == 0 {
+		t.Fatal("real rules not loaded")
+	}
+	if err := m.FlushDNS(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Refresh(ctx); err != nil {
+		t.Fatal(err)
+	}
+	for _, connection := range m.Snapshot().ConnectionDetails {
+		if err := m.CloseConnection(ctx, connection.ID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := m.CloseConnections(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.ReplaceProfile(ctx, first, []byte(directConfig+"mode: direct\n")); err != nil {
+		t.Fatal(err)
+	}
+	if m.Snapshot().Mode != "direct" || !m.Snapshot().Running {
+		t.Fatal("real live edit not applied")
+	}
+	backup, err := m.BackupProfiles()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := m.RestoreProfiles(ctx, backup); err != nil {
+		t.Fatal(err)
+	}
+	if len(m.Snapshot().Profiles) != 4 || m.Snapshot().ActiveProfile != first {
+		t.Fatal("real backup restore replaced profiles")
 	}
 	if err := m.Stop(); err != nil {
 		t.Fatal(err)

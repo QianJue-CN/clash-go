@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -13,38 +14,52 @@ import (
 )
 
 type desktop struct {
-	manager                          *core.Manager
-	ctx                              context.Context
-	window                           *mygo.Window
-	state                            core.Snapshot
-	page, port, subscription, search string
-	kernelProgress                   string
-	message, failure                 string
-	busy, closing                    bool
+	manager                                                                      *core.Manager
+	ctx                                                                          context.Context
+	window                                                                       *mygo.Window
+	state                                                                        core.Snapshot
+	page, port, subscription, search                                             string
+	kernelProgress                                                               string
+	message, failure                                                             string
+	busy, closing                                                                bool
+	showAddSubscription, addingSubscription                                      bool
+	addFailure                                                                   string
+	connectionSearch, ruleSearch, providerSearch, logSearch                      string
+	connectionSort, testURL, testProxy, delayResult                              string
+	connectionPage, rulePage, providerPage                                       int
+	dnsName, dnsType, dnsResult                                                  string
+	pausedLogs                                                                   string
+	logsPaused                                                                   bool
+	showProfileAction                                                            bool
+	profileAction, profileID, profileName, profileData, profileURL, profileError string
+	showConfirm                                                                  bool
+	confirmText                                                                  string
+	confirmAction                                                                func() error
 }
 
 func (s *desktop) reportKernel(message string) {
 	s.window.Update(func() { s.kernelProgress = message })
 }
 
-func (s *desktop) importAndStart(data []byte) error {
-	if err := s.manager.Import(s.ctx, data); err != nil {
-		return err
-	}
-	return s.manager.Start(s.ctx)
-}
-
 // All UI state stays on the main thread; IO runs on one worker at a time.
 func (s *desktop) run(action func() error, message string) {
+	s.runWithResult(action, message, nil)
+}
+
+func (s *desktop) runWithResult(action func() error, message string, complete func(error)) {
 	if s.busy || s.closing {
 		return
 	}
 	s.busy = true
 	s.kernelProgress = ""
+	page := s.page
 	go func() {
 		err := action()
 		if err == nil {
 			err = s.manager.Refresh(s.ctx)
+		}
+		if err == nil {
+			err = s.manager.RefreshPage(s.ctx, page)
 		}
 		state := s.manager.Snapshot()
 		s.window.Update(func() {
@@ -53,6 +68,9 @@ func (s *desktop) run(action func() error, message string) {
 				s.failure = err.Error()
 			} else if message != "" {
 				s.failure, s.message = "", message
+			}
+			if complete != nil {
+				complete(err)
 			}
 		})
 	}()
@@ -68,6 +86,10 @@ func (s *desktop) view(c *ui.Context) {
 				ui.SidebarItem(c, "overview", nil, "概览")
 				ui.SidebarItem(c, "proxies", nil, "代理组")
 				ui.SidebarItem(c, "profiles", nil, "配置")
+				ui.SidebarItem(c, "connections", nil, "连接")
+				ui.SidebarItem(c, "rules", nil, "规则")
+				ui.SidebarItem(c, "providers", nil, "资源")
+				ui.SidebarItem(c, "tools", nil, "工具")
 				ui.SidebarItem(c, "logs", nil, "运行日志")
 				ui.SidebarItem(c, "settings", nil, "设置")
 			}).Grow(1).FillWidth()
@@ -81,7 +103,7 @@ func (s *desktop) view(c *ui.Context) {
 		})
 		ui.Column(c).Grow(1).FillHeight().Padding(28).Gap(18).Children(func() {
 			ui.Row(c).Gap(12).Children(func() {
-				titles := map[string]string{"overview": "概览", "proxies": "代理组", "profiles": "配置", "logs": "运行日志", "settings": "设置"}
+				titles := map[string]string{"overview": "概览", "proxies": "代理组", "profiles": "配置", "connections": "连接", "rules": "规则", "providers": "资源", "tools": "工具", "logs": "运行日志", "settings": "设置"}
 				ui.Text(c, titles[s.page]).FontSize(28).Bold().Grow(1)
 				if s.busy {
 					ui.Text(c, "处理中…").TextColor(t.TextMuted)
@@ -105,15 +127,24 @@ func (s *desktop) view(c *ui.Context) {
 				s.proxies(c)
 			case "profiles":
 				s.profiles(c)
+			case "connections":
+				s.connections(c)
+			case "rules":
+				s.rules(c)
+			case "providers":
+				s.providers(c)
+			case "tools":
+				s.tools(c)
 			case "logs":
-				ui.Text(c, "最近 64 KiB 的内核输出 · 日志可能包含节点或订阅信息，请勿公开分享").FontSize(12).Wrap().TextColor(t.TextMuted)
-				logs := s.state.Logs
-				ui.TextArea(c, &logs).ReadOnly(true).Label("内核日志").FillWidth().Grow(1)
+				s.logs(c)
 			case "settings":
 				s.settings(c)
 			}
 		})
 	})
+	s.subscriptionDialog(c)
+	s.profileDialog(c)
+	s.confirmDialog(c)
 }
 
 func card(c *ui.Context, title, value string) {
@@ -146,6 +177,11 @@ func (s *desktop) overview(c *ui.Context) {
 			}
 			ui.Text(c, title).FontSize(26).Bold()
 			ui.Text(c, detail).TextColor(t.TextMuted).Wrap()
+			for _, profile := range s.state.Profiles {
+				if profile.ID == s.state.ActiveProfile {
+					ui.Text(c, "当前配置："+profile.Name).Wrap()
+				}
+			}
 			if s.state.Running {
 				if ui.Button(c, "停止内核").Disabled(s.busy || s.closing).Clicked() {
 					s.run(s.manager.Stop, "内核已停止")
@@ -166,6 +202,10 @@ func (s *desktop) overview(c *ui.Context) {
 			card(c, "累计上传", sizeText(s.state.Upload))
 			card(c, "累计下载", sizeText(s.state.Download))
 			card(c, "活动连接", fmt.Sprint(s.state.Connections))
+		})
+		ui.Row(c).Gap(12).Children(func() {
+			card(c, "上传速率", sizeText(s.state.UploadRate)+"/s")
+			card(c, "下载速率", sizeText(s.state.DownloadRate)+"/s")
 		})
 		ui.Text(c, "代理模式").Bold()
 		ui.Row(c).Gap(10).Children(func() {
@@ -193,6 +233,7 @@ func (s *desktop) proxies(c *ui.Context) {
 		ui.Text(c, "启动内核后显示代理组和当前节点。").TextColor(c.Theme().TextMuted)
 		return
 	}
+	s.delayControls(c)
 	ui.Scroll(c).Grow(1).Gap(12).Children(func() {
 		shown := 0
 		for _, group := range s.state.Groups {
@@ -221,19 +262,13 @@ func (s *desktop) proxies(c *ui.Context) {
 }
 
 func (s *desktop) profiles(c *ui.Context) {
-	ui.Scroll(c).Grow(1).Gap(18).Children(func() {
-		status := "尚未导入配置"
-		if s.state.HasConfig {
-			status = "已保存配置 · 导入新配置将替换当前配置"
+	disabled := s.busy || s.closing || !s.state.KernelReady
+	ui.Row(c).Gap(12).Children(func() {
+		if ui.PrimaryButton(c, "添加订阅…").Disabled(disabled).Clicked() {
+			s.subscription, s.addFailure, s.showAddSubscription = "", "", true
 		}
-		ui.Text(c, status).Bold()
-		ui.Text(c, s.manager.ConfigPath()).FontSize(12).Wrap().TextColor(c.Theme().TextMuted)
-		ui.Text(c, "仅导入可信的完整 mihomo YAML。内核校验成功后才替换旧配置并自动启动；原始文件保持不变。").Wrap()
-		if s.state.Running {
-			ui.Text(c, "请先停止内核再导入配置。").TextColor(c.Theme().TextMuted)
-		}
-		disabled := s.busy || s.closing || s.state.Running || !s.state.KernelReady
-		if ui.PrimaryButton(c, "导入本地 YAML…").Disabled(disabled).Clicked() {
+		if ui.Button(c, "导入本地 YAML…").Disabled(disabled).Clicked() {
+			first := !s.state.HasConfig
 			s.run(func() error {
 				paths, err := mygo.Dialog.Open(mygo.OpenDialogOptions{Parent: s.window, Title: "导入 mihomo 配置", Filters: []mygo.FileFilter{{Name: "YAML 配置", Extensions: []string{"yaml", "yml"}}}})
 				if err != nil || len(paths) == 0 {
@@ -243,26 +278,105 @@ func (s *desktop) profiles(c *ui.Context) {
 				if err != nil {
 					return err
 				}
-				return s.importAndStart(data)
-			}, "文件选择已完成；导入成功后自动启动内核")
-		}
-		ui.Divider(c)
-		ui.Text(c, "HTTPS 订阅").Bold()
-		ui.TextInput(c, &s.subscription).Placeholder("https://example.com/config.yaml").Label("HTTPS 订阅地址").FillWidth().Disabled(disabled)
-		if ui.Button(c, "下载并导入").Disabled(disabled || strings.TrimSpace(s.subscription) == "").Clicked() {
-			address := strings.TrimSpace(s.subscription)
-			s.run(func() error {
-				data, err := core.Download(s.ctx, address)
-				if err != nil {
+				name := strings.TrimSuffix(filepath.Base(paths[0]), filepath.Ext(paths[0]))
+				if _, err := s.manager.AddProfile(s.ctx, name, data); err != nil {
 					return err
 				}
-				return s.importAndStart(data)
-			}, "订阅已校验并导入，内核已启动")
+				if first {
+					return s.manager.Start(s.ctx)
+				}
+				return nil
+			}, "文件选择已完成；新增本地配置不影响现有配置")
 		}
-		ui.Text(c, "不保存订阅地址；最大 8 MiB。支持 http / inline provider，不支持 Base64 节点列表和本地文件 provider。").FontSize(12).Wrap().TextColor(c.Theme().TextMuted)
+	})
+	s.backupButtons(c)
+	ui.Text(c, "添加订阅不会替换已有配置；首个订阅自动启用。切换时会重启内核并短暂中断连接，失败恢复原配置。").Wrap().TextColor(c.Theme().TextMuted)
+	ui.Scroll(c).Grow(1).Gap(14).Children(func() {
+		if len(s.state.Profiles) == 0 {
+			ui.Text(c, "尚未添加订阅或本地配置").TextColor(c.Theme().TextMuted)
+		}
+		for _, profile := range s.state.Profiles {
+			ui.Column(c.Key(profile.ID)).Padding(18).Gap(12).Radius(12).Border(1, c.Theme().Border).Children(func() {
+				ui.Text(c, profile.Name).Bold().Wrap()
+				s.profileButtons(c, profile)
+				active := profile.ID == s.state.ActiveProfile
+				ui.Row(c).Gap(12).Children(func() {
+					if active {
+						ui.Text(c, "当前配置").TextColor(c.Theme().Accent)
+					}
+					ui.Spacer(c)
+					label := "切换并启用"
+					if active && s.state.Running {
+						label = "使用中"
+					}
+					if ui.Button(c, label).Label("启用订阅 " + profile.Name).Disabled(disabled || (active && s.state.Running)).Clicked() {
+						s.run(func() error { return s.manager.SwitchProfile(s.ctx, profile.ID) }, "已启用："+profile.Name)
+					}
+				})
+			})
+		}
 		ui.Divider(c)
-		ui.Text(c, "导入时接管监听设置").Bold()
-		ui.Text(c, "保留节点、代理组、规则及 DNS 解析设置。覆盖本地端口，禁用局域网访问、TUN、额外监听器及 DNS 监听；不导入脚本和外部面板。Provider 缓存统一放在应用数据目录。").Wrap().TextColor(c.Theme().TextMuted)
+		ui.Text(c, "支持完整 mihomo YAML；每个配置最大 8 MiB。名称优先读取订阅标题或下载文件名，无法获取时使用“订阅 N”。可编辑 YAML 或手动更新订阅；更新需重新填写 HTTPS 地址，不持久化订阅链接。").FontSize(12).Wrap().TextColor(c.Theme().TextMuted)
+		ui.Text(c, "导入时接管监听设置，禁用局域网访问、TUN 和额外监听器。支持 http / inline provider，不支持 Base64 节点列表。运行中可添加本地配置；删除正在使用的配置前请先停止或切换。").FontSize(12).Wrap().TextColor(c.Theme().TextMuted)
+	})
+}
+
+func (s *desktop) subscriptionDialog(c *ui.Context) {
+	dialog := ui.Modal(c, &s.showAddSubscription, func() {
+		ui.Column(c).Width(460).Gap(14).Children(func() {
+			ui.Text(c, "添加订阅").FontSize(22).Bold()
+			ui.Text(c, "填写 HTTPS 订阅链接，下载后自动识别名称；无法识别时使用编号名称。").Wrap().TextColor(c.Theme().TextMuted)
+			submitted := ui.TextInput(c, &s.subscription).Placeholder("https://example.com/config.yaml").Label("HTTPS 订阅地址").FillWidth().AutoFocus().Disabled(s.addingSubscription).Submitted()
+			if s.addFailure != "" {
+				ui.Text(c, s.addFailure).Wrap().TextColor(c.Theme().Danger)
+			}
+			if s.addingSubscription {
+				ui.Text(c, "正在下载并校验订阅…").TextColor(c.Theme().TextMuted)
+			}
+			ui.Row(c).Gap(10).Justify(ui.End).Children(func() {
+				if ui.Button(c, "取消").Disabled(s.addingSubscription).Clicked() {
+					s.showAddSubscription, s.subscription, s.addFailure = false, "", ""
+				}
+				clicked := ui.PrimaryButton(c, "确认添加").Disabled(s.busy || s.closing || strings.TrimSpace(s.subscription) == "").Clicked()
+				if clicked || submitted {
+					s.submitSubscription()
+				}
+			})
+		})
+	})
+	if dialog.Dismissed() {
+		if s.addingSubscription {
+			s.showAddSubscription = true
+		} else {
+			s.subscription, s.addFailure = "", ""
+		}
+	}
+}
+
+func (s *desktop) submitSubscription() {
+	if s.busy || s.closing || strings.TrimSpace(s.subscription) == "" {
+		return
+	}
+	address, first := strings.TrimSpace(s.subscription), !s.state.HasConfig
+	var addedID string
+	s.addingSubscription, s.addFailure = true, ""
+	s.runWithResult(func() error {
+		profile, err := core.Download(s.ctx, address)
+		if err != nil {
+			return err
+		}
+		addedID, err = s.manager.AddProfile(s.ctx, profile.Name, profile.Data)
+		return err
+	}, "订阅已保存，可在列表中切换", func(err error) {
+		s.addingSubscription = false
+		if addedID != "" {
+			s.showAddSubscription, s.subscription, s.addFailure = false, "", ""
+			if first && err == nil {
+				s.run(func() error { return s.manager.Start(s.ctx) }, "首个订阅已保存并启用")
+			}
+		} else if err != nil {
+			s.addFailure = err.Error()
+		}
 	})
 }
 

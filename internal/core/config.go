@@ -55,7 +55,12 @@ func Normalize(data []byte, controller, secret string, port int) ([]byte, error)
 				return nil, fmt.Errorf("%s/%s 仅支持 http 或 inline provider", key, name)
 			}
 			if provider["type"] == "http" {
-				id := sha256.Sum256([]byte(key + "/" + name))
+				delete(provider, "path")
+				identity, err := yaml.Marshal(provider)
+				if err != nil {
+					return nil, fmt.Errorf("无法生成 provider 缓存标识: %w", err)
+				}
+				id := sha256.Sum256(append([]byte(key+"/"+name+"/"), identity...))
 				provider["path"] = fmt.Sprintf("./providers/%x", id[:16])
 			} else {
 				delete(provider, "path")

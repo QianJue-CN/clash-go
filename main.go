@@ -47,7 +47,7 @@ func main() {
 					return
 				case <-ticker.C:
 					s.window.Update(func() {
-						if !s.busy && !s.closing {
+						if !s.busy && !s.closing && !s.showAddSubscription && !s.showProfileAction && !s.showConfirm {
 							s.run(func() error { return nil }, "")
 						}
 					})

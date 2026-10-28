@@ -106,7 +106,10 @@ func (m *Manager) Initialize(ctx context.Context, progress func(string)) error {
 			return err
 		}
 	}
-	if _, err := os.Stat(m.ConfigPath()); os.IsNotExist(err) {
+	if m.profiles.Active == "" {
+		return nil
+	}
+	if _, err := os.Stat(m.configPath()); os.IsNotExist(err) {
 		return nil
 	} else if err != nil {
 		return err
@@ -162,12 +165,14 @@ func (m *Manager) updateKernel(ctx context.Context, progress func(string)) error
 	if err := probeKernel(ctx, candidatePath, candidate.Version); err != nil {
 		return err
 	}
-	if _, err := os.Stat(m.ConfigPath()); err == nil {
-		if err := m.validate(ctx, candidatePath, m.ConfigPath()); err != nil {
+	if m.profiles.Active != "" {
+		if _, err := os.Stat(m.configPath()); err == nil {
+			if err := m.validate(ctx, candidatePath, m.configPath()); err != nil {
+				return err
+			}
+		} else if !os.IsNotExist(err) {
 			return err
 		}
-	} else if !os.IsNotExist(err) {
-		return err
 	}
 	if err := ctx.Err(); err != nil {
 		return err

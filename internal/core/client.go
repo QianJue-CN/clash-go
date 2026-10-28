@@ -3,12 +3,18 @@ package core
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
+	"mime"
 	"net/http"
 	"net/url"
+	"path"
+	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 )
 
 type apiClient struct {
@@ -61,39 +67,105 @@ func (c *apiClient) request(ctx context.Context, method, path string, body, resu
 	return json.Unmarshal(data, result)
 }
 
+type DownloadedProfile struct {
+	Name string
+	Data []byte
+}
+
 // Download accepts HTTPS only, including redirects, and never logs subscription tokens.
-func Download(ctx context.Context, rawURL string) ([]byte, error) {
-	u, err := url.Parse(rawURL)
-	if err != nil || u.Scheme != "https" || u.Host == "" || u.User != nil || u.Fragment != "" {
-		return nil, fmt.Errorf("请输入不含用户信息或片段的 HTTPS 订阅地址")
-	}
-	client := directHTTP(30 * time.Second)
+func Download(ctx context.Context, rawURL string) (DownloadedProfile, error) {
+	client := subscriptionHTTP()
 	defer client.CloseIdleConnections()
+	return downloadProfile(ctx, client, rawURL)
+}
+
+func subscriptionHTTP() *http.Client {
+	client := directHTTP(30 * time.Second)
 	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
 		if len(via) >= 5 || req.URL.Scheme != "https" || req.URL.User != nil {
 			return fmt.Errorf("拒绝不安全或过多的重定向")
 		}
 		return nil
 	}
+	return client
+}
+
+func downloadProfile(ctx context.Context, client *http.Client, rawURL string) (DownloadedProfile, error) {
+	var result DownloadedProfile
+	u, err := url.Parse(rawURL)
+	if err != nil || u.Scheme != "https" || u.Host == "" || u.User != nil || u.Fragment != "" {
+		return result, fmt.Errorf("请输入不含用户信息或片段的 HTTPS 订阅地址")
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 	if err != nil {
-		return nil, fmt.Errorf("无效订阅地址")
+		return result, fmt.Errorf("无效订阅地址")
 	}
 	req.Header.Set("User-Agent", "ClashGo/0.1 mihomo")
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("订阅下载失败，请检查网络、TLS 证书或地址")
+		return result, fmt.Errorf("订阅下载失败，请检查网络、TLS 证书或地址")
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("订阅服务器返回 HTTP %d", resp.StatusCode)
+		return result, fmt.Errorf("订阅服务器返回 HTTP %d", resp.StatusCode)
 	}
 	data, err := io.ReadAll(io.LimitReader(resp.Body, MaxConfigSize+1))
 	if err != nil {
-		return nil, fmt.Errorf("读取订阅失败")
+		return result, fmt.Errorf("读取订阅失败")
 	}
 	if len(data) > MaxConfigSize {
-		return nil, fmt.Errorf("订阅不能超过 8 MiB")
+		return result, fmt.Errorf("订阅不能超过 8 MiB")
 	}
-	return data, nil
+	return DownloadedProfile{Name: subscriptionName(resp.Header), Data: data}, nil
+}
+
+func subscriptionName(header http.Header) string {
+	title := strings.TrimSpace(header.Get("Profile-Title"))
+	if encoded, ok := strings.CutPrefix(title, "base64:"); ok {
+		data, err := base64.StdEncoding.DecodeString(encoded)
+		if err != nil {
+			data, err = base64.RawStdEncoding.DecodeString(encoded)
+		}
+		if err == nil {
+			title = string(data)
+		} else {
+			title = ""
+		}
+	} else if decoded, err := url.PathUnescape(title); err == nil {
+		title = decoded
+	}
+	if title = cleanProfileName(title); title != "" {
+		return title
+	}
+	_, params, err := mime.ParseMediaType(header.Get("Content-Disposition"))
+	if err != nil {
+		return ""
+	}
+	filename := path.Base(strings.ReplaceAll(params["filename"], `\`, "/"))
+	if filename == "." || filename == "/" {
+		return ""
+	}
+	switch strings.ToLower(path.Ext(filename)) {
+	case ".yaml", ".yml":
+		filename = strings.TrimSuffix(filename, path.Ext(filename))
+	}
+	return cleanProfileName(filename)
+}
+
+func cleanProfileName(name string) string {
+	if !utf8.ValidString(name) {
+		return ""
+	}
+	name = strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) {
+			return -1
+		}
+		return r
+	}, name)
+	name = strings.Join(strings.Fields(name), " ")
+	runes := []rune(name)
+	if len(runes) > 80 {
+		name = string(runes[:80])
+	}
+	return name
 }

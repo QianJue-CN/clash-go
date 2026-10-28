@@ -26,15 +26,22 @@ type Group struct {
 }
 
 type Snapshot struct {
-	Port                int
-	KernelVersion       string
-	KernelReady         bool
-	Running, HasConfig  bool
-	Version, Mode, Logs string
-	Started             time.Time
-	Upload, Download    int64
-	Connections         int
-	Groups              []Group
+	Port                     int
+	KernelVersion            string
+	KernelReady              bool
+	Running, HasConfig       bool
+	Version, Mode, Logs      string
+	Started                  time.Time
+	Upload, Download         int64
+	Connections              int
+	UploadRate, DownloadRate int64
+	SampledAt                time.Time
+	ConnectionDetails        []Connection
+	Rules                    []Rule
+	Providers                []Provider
+	Groups                   []Group
+	Profiles                 []Profile
+	ActiveProfile            string
 }
 
 type logBuffer struct {
@@ -79,6 +86,7 @@ type Manager struct {
 	settings  Settings
 	kernel    installedKernel
 	downloads *http.Client
+	profiles  profileCatalog
 }
 
 func NewManager(dir string) (*Manager, error) {
@@ -108,10 +116,17 @@ func NewManager(dir string) (*Manager, error) {
 	if err := m.loadKernel(); err != nil {
 		return nil, err
 	}
+	if err := m.loadProfiles(); err != nil {
+		return nil, err
+	}
 	return m, nil
 }
 
-func (m *Manager) ConfigPath() string  { return filepath.Join(m.dir, "config.yaml") }
+func (m *Manager) ConfigPath() string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.configPath()
+}
 func (m *Manager) runtimePath() string { return filepath.Join(m.dir, "runtime.yaml") }
 
 func coreCommand(ctx context.Context, binary string, args ...string) (*exec.Cmd, error) {
@@ -157,37 +172,12 @@ func (m *Manager) validate(ctx context.Context, binary, path string) error {
 func (m *Manager) Import(ctx context.Context, data []byte) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if err := m.verifyKernel(ctx); err != nil {
-		return err
-	}
 	m.reap()
 	if m.proc != nil {
-		return fmt.Errorf("请先停止内核再替换配置")
+		return fmt.Errorf("请先停止内核再导入并启用本地配置")
 	}
-	normalized, err := Normalize(data, "", "", m.settings.Port)
-	if err != nil {
-		return err
-	}
-	f, err := os.CreateTemp(m.dir, ".validate-*.yaml")
-	if err != nil {
-		return err
-	}
-	path := f.Name()
-	if err := f.Close(); err != nil {
-		os.Remove(path)
-		return err
-	}
-	defer os.Remove(path)
-	if err := writePrivate(path, normalized); err != nil {
-		return err
-	}
-	if err := m.validate(ctx, m.kernelPath(), path); err != nil {
-		return err
-	}
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	return writePrivate(m.ConfigPath(), normalized)
+	_, err := m.addProfile(ctx, "本地配置", data, true)
+	return err
 }
 
 func (m *Manager) Start(ctx context.Context) error {
@@ -207,7 +197,10 @@ func (m *Manager) start(ctx context.Context, binary string) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	data, err := ReadConfig(m.ConfigPath())
+	if m.profiles.Active == "" {
+		return fmt.Errorf("请先导入配置")
+	}
+	data, err := ReadConfig(m.configPath())
 	if err != nil {
 		return fmt.Errorf("请先导入配置: %w", err)
 	}
@@ -345,8 +338,10 @@ func (m *Manager) Snapshot() Snapshot {
 	s.Port = m.settings.Port
 	s.KernelVersion = m.kernel.Version
 	s.KernelReady = m.kernel.File != ""
-	_, err := os.Stat(m.ConfigPath())
-	s.HasConfig = err == nil
+	s.Profiles = append([]Profile(nil), m.profiles.Items...)
+	s.ActiveProfile = m.profiles.Active
+	_, err := os.Stat(m.configPath())
+	s.HasConfig = m.profiles.Active != "" && err == nil
 	s.Logs = m.logs.String()
 	return s
 }
@@ -375,9 +370,9 @@ func (m *Manager) refresh(ctx context.Context) error {
 		return err
 	}
 	var connections struct {
-		Upload      int64 `json:"uploadTotal"`
-		Download    int64 `json:"downloadTotal"`
-		Connections []any `json:"connections"`
+		Upload      int64        `json:"uploadTotal"`
+		Download    int64        `json:"downloadTotal"`
+		Connections []Connection `json:"connections"`
 	}
 	if err := m.api.request(ctx, http.MethodGet, "/connections", nil, &connections); err != nil {
 		return err
@@ -391,6 +386,13 @@ func (m *Manager) refresh(ctx context.Context) error {
 	}
 	sort.Slice(groups, func(i, j int) bool { return groups[i].Name < groups[j].Name })
 	m.state.Mode, m.state.Groups = configs.Mode, groups
+	now := time.Now()
+	if !m.state.SampledAt.IsZero() {
+		m.state.UploadRate = transferRate(connections.Upload, m.state.Upload, now.Sub(m.state.SampledAt))
+		m.state.DownloadRate = transferRate(connections.Download, m.state.Download, now.Sub(m.state.SampledAt))
+	}
+	m.state.SampledAt = now
+	m.state.ConnectionDetails = connections.Connections
 	m.state.Upload, m.state.Download, m.state.Connections = connections.Upload, connections.Download, len(connections.Connections)
 	return nil
 }
