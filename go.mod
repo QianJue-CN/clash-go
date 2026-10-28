@@ -2,6 +2,8 @@ module clashgo
 
 go 1.27.3
 
+tool github.com/egoist/mygo/cmd/mygo
+
 require (
 	github.com/egoist/mygo v0.6.4
 	gopkg.in/yaml.v3 v3.0.1

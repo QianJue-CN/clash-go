@@ -50,4 +50,7 @@ kernel's license.
 The exact versions and checksums are recorded in `go.mod` and `go.sum`.
 Dependency license files are included in their source modules; binary release
 packagers must retain the applicable notices for all bundled dependencies.
-This project currently provides source and a local build, not a signed installer.
+Release packages include the project's LICENSE, this notice, and a generated
+THIRD_PARTY_LICENSES.txt containing the Go toolchain and module license notices.
+The release workflow produces unsigned Windows installers and ad-hoc-signed,
+non-notarized macOS packages; it does not bundle the mihomo kernel.

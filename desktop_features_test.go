@@ -6,8 +6,20 @@ import (
 	"time"
 
 	"clashgo/internal/core"
+	"github.com/egoist/mygo"
 	"github.com/egoist/mygo/ui"
 )
+
+func TestAboutUsesAppVersion(t *testing.T) {
+	version := mygo.App.Version()
+	mygo.App.SetVersion("9.8.7")
+	defer mygo.App.SetVersion(version)
+	s := &desktop{page: "settings"}
+	tt := ui.NewTester(s.view, 1080, 760)
+	if !tt.HasText("9.8.7 · MyGo 原生 UI · 独立 mihomo 内核") {
+		t.Fatal("about page does not use packaged version")
+	}
+}
 
 func TestFeatureNavigation(t *testing.T) {
 	s := &desktop{page: "overview"}

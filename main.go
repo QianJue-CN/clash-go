@@ -15,7 +15,6 @@ import (
 
 func main() {
 	mygo.App.SetName("Clash Go")
-	mygo.App.SetVersion("0.1.0")
 	if !mygo.App.RequestSingleInstanceLock() {
 		return
 	}

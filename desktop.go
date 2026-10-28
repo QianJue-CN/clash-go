@@ -411,7 +411,11 @@ func (s *desktop) settings(c *ui.Context) {
 		})
 		ui.Divider(c)
 		ui.Text(c, "关于 Clash Go").Bold()
-		ui.Text(c, "0.1.0 · MyGo 原生 UI · 独立 mihomo 内核").TextColor(c.Theme().TextMuted)
+		appVersion := mygo.App.Version()
+		if appVersion == "" {
+			appVersion = "开发版"
+		}
+		ui.Text(c, appVersion+" · MyGo 原生 UI · 独立 mihomo 内核").TextColor(c.Theme().TextMuted)
 		ui.Text(c, "没有 HTML、JavaScript 或 WebView。界面跟随系统主题；后台请求不会阻塞窗口。").Wrap()
 		ui.Link(c, "MyGo ↗", "https://github.com/egoist/mygo")
 	})

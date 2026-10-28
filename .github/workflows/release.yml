@@ -1,0 +1,132 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing release tag, e.g. v0.2.0'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  TAG: ${{ inputs.tag || github.ref_name }}
+  GOFLAGS: -buildvcs=false
+
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    outputs:
+      sha: ${{ steps.tag.outputs.sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+          persist-credentials: false
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Validate release tag and commit
+        id: tag
+        run: |
+          python3 -c 'import os, sys; sys.path.insert(0, "scripts"); from release import version_from_tag; print(version_from_tag(os.environ["TAG"]))'
+          sha="$(git rev-parse --verify "refs/tags/$TAG^{commit}")"
+          test "$sha" = "$(git rev-parse HEAD)"
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+      - name: Test application and release scripts
+        run: |
+          make check
+          python3 -m unittest discover -s scripts -p 'test_*.py' -v
+
+  build:
+    needs: check
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {runner: ubuntu-24.04, platform: linux/amd64, target: linux-amd64}
+          - {runner: ubuntu-24.04, platform: linux/arm64, target: linux-arm64}
+          - {runner: ubuntu-24.04, platform: windows/amd64, target: windows-amd64}
+          - {runner: ubuntu-24.04, platform: windows/arm64, target: windows-arm64}
+          - {runner: macos-15, platform: darwin/amd64, target: darwin-amd64}
+          - {runner: macos-15, platform: darwin/arm64, target: darwin-arm64}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.check.outputs.sha }}
+          persist-credentials: false
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Install Windows installer compiler
+        if: startsWith(matrix.target, 'windows-')
+        run: sudo apt-get update && sudo apt-get install -y nsis
+      - name: Prepare package version and licenses
+        env:
+          TARGET: ${{ matrix.target }}
+        run: python3 scripts/release.py prepare "$TAG" --target "$TARGET"
+      - name: Build installers with MyGo
+        env:
+          PLATFORM: ${{ matrix.platform }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          go tool mygo build -platform "$PLATFORM"
+          python3 scripts/release.py collect "$TAG" --target "$TARGET"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: packages-${{ matrix.target }}
+          path: build/release/*
+          if-no-files-found: error
+          retention-days: 14
+
+  publish:
+    needs: [check, build]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.check.outputs.sha }}
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: packages-*
+          path: build/release
+          merge-multiple: true
+      - name: Verify complete asset set and generate checksums
+        run: python3 scripts/release.py manifest "$TAG"
+      - name: Publish complete release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          EXPECTED_SHA: ${{ needs.check.outputs.sha }}
+        run: |
+          test "$(gh api "repos/$GH_REPO/commits/$TAG" --jq .sha)" = "$EXPECTED_SHA"
+          if draft="$(gh release view "$TAG" --json isDraft --jq .isDraft)"; then
+            if [ "$draft" != true ]; then
+              echo "Refusing to overwrite an already published release: $TAG" >&2
+              exit 1
+            fi
+          else
+            gh release create "$TAG" --verify-tag --draft --title "Clash Go $TAG" \
+              --notes-file docs/RELEASE_NOTES.md
+          fi
+          gh release upload "$TAG" build/release/* --clobber
+          gh release edit "$TAG" --draft=false

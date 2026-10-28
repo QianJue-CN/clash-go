@@ -1,0 +1,26 @@
+{
+  "name": "Clash Go",
+  "identifier": "io.github.qianjue-cn.clash-go",
+  "version": "0.1.0",
+  "main": ".",
+  "out": "build/packages",
+  "resources": [
+    "LICENSE",
+    "THIRD_PARTY_NOTICES.md",
+    "build/THIRD_PARTY_LICENSES.txt"
+  ],
+  "macos": {
+    "minimumSystemVersion": "12.0",
+    "signingIdentity": "-"
+  },
+  "linux": {
+    "webview": false,
+    "command": "clash-go",
+    "categories": [
+      "Network",
+      "Utility"
+    ],
+    "comment": "Native desktop proxy client powered by mihomo",
+    "maintainer": "QianJue-CN"
+  }
+}
